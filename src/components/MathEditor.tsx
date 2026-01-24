@@ -65,6 +65,12 @@ const MathEditor = forwardRef<MathEditorRef, MathEditorProps>(({ value, onChange
       <math-field
         ref={mfRef}
         className="math-field"
+        style={{
+          '--background': 'var(--bg-tertiary)',
+          '--text-color': 'var(--text-primary)',
+          '--caret-color': 'var(--accent)',
+          '--selection-background-color': 'rgba(99, 102, 241, 0.3)',
+        } as React.CSSProperties}
       >
         {value}
       </math-field>

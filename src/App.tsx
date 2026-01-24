@@ -1,11 +1,28 @@
+// Math Editor - Updated
 import { useState, useRef, useEffect, useCallback } from 'react';
 import MathEditor from './components/MathEditor';
 import MathToolbar from './components/MathToolbar';
 import EquationHistory from './components/EquationHistory';
-import { Copy, Check, Calculator, FileOutput, Keyboard, Sun, Moon, Sparkles, Download, Image as ImageIcon } from 'lucide-react';
+import { EquationTemplates } from './components/EquationTemplates';
+import { SaveTemplateModal } from './components/SaveTemplateModal';
+import { ToastContainer } from './components/Toast';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
+import { ViewModeToggle } from './components/ViewModeToggle';
+import { SplitView } from './components/SplitView';
+import { QuickActions } from './components/QuickActions';
+import { QuickCommandBar } from './components/QuickCommandBar';
+import { CASCalculator } from './components/CASCalculator';
+import { Copy, Check, Calculator, FileOutput, Keyboard, Sun, Moon, Sparkles, Download, Image as ImageIcon, HelpCircle, FileCode, BookmarkPlus, Radical } from 'lucide-react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import { useEquationHistory } from './hooks/useEquationHistory';
-import { exportAsPNG, downloadBlob, copyImageToClipboard } from './utils/export';
+import { useEquationTemplates } from './hooks/useEquationTemplates';
+import { useViewMode } from './hooks/useViewMode';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useToast } from './hooks/useToast';
+import { useQuickCommands } from './hooks/useQuickCommands';
+import { useCASPanel } from './hooks/useCASPanel';
+import { matchesShortcut } from './data/defaultShortcuts';
+import { exportAsPNG, exportAsSVG, downloadBlob, downloadSVG, copyImageToClipboard } from './utils/export';
 import type { MathEditorRef, Theme } from './types';
 import './App.css';
 
@@ -14,10 +31,27 @@ function App() {
   const [copied, setCopied] = useState(false);
   const [theme, setTheme] = useLocalStorage<Theme>('theme', 'dark');
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
   const [exportingImage, setExportingImage] = useState(false);
   const editorRef = useRef<MathEditorRef>(null);
 
   const { history, addToHistory, removeFromHistory, clearHistory } = useEquationHistory();
+  const { templates, categories, addTemplate, removeTemplate } = useEquationTemplates();
+  const { viewMode, setViewMode } = useViewMode();
+  const { shortcuts, updateShortcut, resetShortcut, resetAllShortcuts, getShortcut, hasConflict } = useKeyboardShortcuts();
+  const { toasts, showToast, dismissToast } = useToast();
+  const {
+    pinnedCommands,
+    recentCommands,
+    frequentCommands,
+    trackCommand,
+    togglePin,
+    pinSymbol,
+    removeCommand,
+    clearRecent,
+    reorderCommands
+  } = useQuickCommands();
+  const { isOpen: isCASOpen, open: openCAS, close: closeCAS, toggle: toggleCAS } = useCASPanel();
 
   // Apply theme on mount and when it changes
   useEffect(() => {
@@ -45,9 +79,10 @@ function App() {
     try {
       await navigator.clipboard.writeText(equation);
       setCopied(true);
+      showToast('LaTeX copié !', 'success');
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      console.error('Failed to copy!', err);
+      showToast('Erreur lors de la copie', 'error');
     }
   };
 
@@ -57,12 +92,45 @@ function App() {
   };
 
   const handleInsert = (latex: string) => {
-    editorRef.current?.insert(latex);
+    if (viewMode === 'visual') {
+      editorRef.current?.insert(latex);
+    } else {
+      // In split or latex mode, append to the equation
+      setEquation((prev) => prev + latex);
+    }
+  };
+
+  const handleSymbolUsed = (symbol: { latex: string; label: string }, category: string) => {
+    trackCommand(symbol.latex, symbol.label, category);
+  };
+
+  const handlePinSymbol = (symbol: { latex: string; label: string }, category: string) => {
+    pinSymbol(symbol.latex, symbol.label, category);
+    showToast(`${symbol.label} épinglé !`, 'success');
+  };
+
+  const handleQuickInsert = (latex: string) => {
+    handleInsert(latex);
   };
 
   const handleHistorySelect = (selectedEquation: string) => {
     setEquation(selectedEquation);
     editorRef.current?.focus();
+  };
+
+  const handleTemplateSelect = (latex: string) => {
+    setEquation(latex);
+    editorRef.current?.focus();
+  };
+
+  const handleSaveTemplate = (name: string, category?: string) => {
+    addTemplate(name, equation, category);
+    showToast('Modèle sauvegardé !', 'success');
+  };
+
+  const handleDeleteTemplate = (id: string) => {
+    removeTemplate(id);
+    showToast('Modèle supprimé', 'info');
   };
 
   const handleExportPNG = async () => {
@@ -78,9 +146,10 @@ function App() {
       if (blob) {
         const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
         downloadBlob(blob, `equation-${timestamp}.png`);
+        showToast('Image exportée !', 'success');
       }
     } catch (error) {
-      console.error('Export failed:', error);
+      showToast('Erreur lors de l\'export', 'error');
     } finally {
       setExportingImage(false);
     }
@@ -100,43 +169,119 @@ function App() {
         const success = await copyImageToClipboard(blob);
         if (success) {
           setCopied(true);
+          showToast('Image copiée !', 'success');
           setTimeout(() => setCopied(false), 2000);
         }
       }
     } catch (error) {
-      console.error('Copy as image failed:', error);
+      showToast('Erreur lors de la copie de l\'image', 'error');
+    } finally {
+      setExportingImage(false);
+    }
+  };
+
+  const handleExportSVG = async () => {
+    if (!equation) return;
+
+    setExportingImage(true);
+    try {
+      const svgString = await exportAsSVG(equation);
+
+      if (svgString) {
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        downloadSVG(svgString, `equation-${timestamp}.svg`);
+        showToast('SVG exporté !', 'success');
+      } else {
+        showToast('Erreur: SVG non disponible', 'error');
+      }
+    } catch (error) {
+      showToast('Erreur lors de l\'export SVG', 'error');
     } finally {
       setExportingImage(false);
     }
   };
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Cmd/Ctrl + C when not in input - copy LaTeX
-    if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !equation) return;
+    const copyLatexShortcut = getShortcut('copy-latex');
+    const exportPngShortcut = getShortcut('export-png');
+    const exportSvgShortcut = getShortcut('export-svg');
+    const clearShortcut = getShortcut('clear');
+    const showShortcutsShortcut = getShortcut('show-shortcuts');
 
-    // Cmd/Ctrl + Shift + C - copy LaTeX
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'C') {
+    // Copy LaTeX
+    if (copyLatexShortcut && matchesShortcut(e, copyLatexShortcut)) {
       e.preventDefault();
       handleCopy();
+      return;
     }
 
-    // Cmd/Ctrl + Backspace - clear
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
+    // Export PNG
+    if (exportPngShortcut && matchesShortcut(e, exportPngShortcut)) {
+      e.preventDefault();
+      handleExportPNG();
+      return;
+    }
+
+    // Export SVG
+    if (exportSvgShortcut && matchesShortcut(e, exportSvgShortcut)) {
+      e.preventDefault();
+      handleExportSVG();
+      return;
+    }
+
+    // Clear
+    if (clearShortcut && matchesShortcut(e, clearShortcut)) {
       e.preventDefault();
       handleClear();
+      return;
     }
 
-    // Escape - close shortcuts modal
-    if (e.key === 'Escape') {
-      setShowShortcuts(false);
-    }
-
-    // Cmd/Ctrl + / - show shortcuts
-    if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+    // Show shortcuts
+    if (showShortcutsShortcut && matchesShortcut(e, showShortcutsShortcut)) {
       e.preventDefault();
       setShowShortcuts(prev => !prev);
+      return;
     }
-  }, [equation]);
+
+    // Escape - close modals
+    if (e.key === 'Escape') {
+      setShowShortcuts(false);
+      setShowSaveTemplate(false);
+      closeCAS();
+    }
+
+    // Cmd/Ctrl + K - open CAS Calculator
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      toggleCAS();
+      return;
+    }
+
+    // ? - show help (shortcuts)
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey) {
+      // Only trigger if not typing in an input/mathfield
+      const target = e.target as HTMLElement;
+      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && !target.closest('math-field')) {
+        e.preventDefault();
+        setShowShortcuts(true);
+      }
+    }
+
+    // Quick mode switching with Cmd/Ctrl + 1-4
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      const modeMap: Record<string, 'visual' | 'split' | 'latex' | 'latex-to-visual'> = {
+        '1': 'visual',
+        '2': 'split',
+        '3': 'latex',
+        '4': 'latex-to-visual',
+      };
+      if (modeMap[e.key]) {
+        e.preventDefault();
+        setViewMode(modeMap[e.key]);
+        showToast(`Mode: ${modeMap[e.key] === 'visual' ? 'Visuel' : modeMap[e.key] === 'split' ? 'Divisé' : modeMap[e.key] === 'latex' ? 'LaTeX' : 'LaTeX → Visuel'}`, 'info');
+      }
+    }
+  }, [getShortcut, setViewMode, showToast, closeCAS, toggleCAS]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -159,6 +304,22 @@ function App() {
 
         <div className="header-actions">
           <button
+            className={`icon-btn cas-btn ${isCASOpen ? 'active' : ''}`}
+            onClick={toggleCAS}
+            title="Calculatrice CAS (⌘K)"
+            aria-label="Ouvrir la calculatrice CAS"
+          >
+            <Radical size={20} />
+          </button>
+          <button
+            className="icon-btn help-btn"
+            onClick={() => setShowShortcuts(true)}
+            title="Aide (?)"
+            aria-label="Afficher l'aide et les raccourcis"
+          >
+            <HelpCircle size={20} />
+          </button>
+          <button
             className="icon-btn"
             onClick={() => setShowShortcuts(true)}
             title="Raccourcis (⌘/)"
@@ -178,24 +339,55 @@ function App() {
       </header>
 
       <main>
-        <MathToolbar onInsert={handleInsert} />
+        <MathToolbar onInsert={handleInsert} onSymbolUsed={handleSymbolUsed} onPinSymbol={handlePinSymbol} />
 
         <div className="editor-card">
           <div className="card-header">
-            <span className="label">Éditeur visuel</span>
-            <button
-              onClick={handleClear}
-              className="clear-btn"
-              disabled={!equation}
-              aria-label="Effacer l'équation"
-            >
-              Effacer
-            </button>
+            <span className="label">
+              {viewMode === 'visual' ? 'Éditeur visuel' : viewMode === 'split' ? 'Mode divisé' : viewMode === 'latex-to-visual' ? 'LaTeX → Visuel' : 'Éditeur LaTeX'}
+            </span>
+            <div className="editor-actions">
+              <ViewModeToggle mode={viewMode} onChange={setViewMode} />
+              <button
+                onClick={handleClear}
+                className="clear-btn"
+                disabled={!equation}
+                aria-label="Effacer l'équation"
+              >
+                Effacer
+              </button>
+            </div>
           </div>
-          <MathEditor ref={editorRef} value={equation} onChange={setEquation} />
+
+          {viewMode === 'visual' ? (
+            <MathEditor ref={editorRef} value={equation} onChange={setEquation} />
+          ) : (
+            <SplitView
+              equation={equation}
+              onEquationChange={setEquation}
+              viewMode={viewMode}
+            />
+          )}
+
+          {viewMode === 'latex-to-visual' && equation && (
+            <div className="latex-help-hint">
+              Exemples : \frac{'{a}{b}'} • \sqrt{'{x}'} • \int_0^1 • \sum_{'{n=1}'}^{'{\\infty}'} • \alpha \beta \gamma
+            </div>
+          )}
         </div>
 
-        {equation && (
+        <QuickCommandBar
+          pinnedCommands={pinnedCommands}
+          recentCommands={recentCommands}
+          frequentCommands={frequentCommands}
+          onInsert={handleQuickInsert}
+          onTogglePin={togglePin}
+          onRemove={removeCommand}
+          onClearRecent={clearRecent}
+          onReorder={reorderCommands}
+        />
+
+        {viewMode === 'visual' && equation && (
           <div className="preview-card">
             <div className="card-header">
               <span className="label">
@@ -229,10 +421,19 @@ function App() {
                 onClick={handleExportPNG}
                 disabled={!equation || exportingImage}
                 className="export-btn"
-                title="Télécharger PNG"
+                title="Télécharger PNG (⌘⇧E)"
                 aria-label="Télécharger l'équation en PNG"
               >
                 <Download size={16} />
+              </button>
+              <button
+                onClick={handleExportSVG}
+                disabled={!equation || exportingImage}
+                className="export-btn"
+                title="Télécharger SVG (⌘⇧S)"
+                aria-label="Télécharger l'équation en SVG"
+              >
+                <FileCode size={16} />
               </button>
               <button
                 onClick={handleCopy}
@@ -242,6 +443,15 @@ function App() {
               >
                 {copied ? <Check size={16} /> : <Copy size={16} />}
                 {copied ? 'Copié !' : 'Copier'}
+              </button>
+              <button
+                onClick={() => setShowSaveTemplate(true)}
+                disabled={!equation}
+                className="save-template-btn"
+                title="Sauvegarder comme modèle"
+                aria-label="Sauvegarder l'équation comme modèle"
+              >
+                <BookmarkPlus size={16} />
               </button>
             </div>
           </div>
@@ -254,6 +464,13 @@ function App() {
           </div>
         </div>
 
+        <EquationTemplates
+          templates={templates}
+          categories={categories}
+          onSelect={handleTemplateSelect}
+          onDelete={handleDeleteTemplate}
+        />
+
         <EquationHistory
           history={history}
           onSelect={handleHistorySelect}
@@ -263,62 +480,42 @@ function App() {
       </main>
 
       <footer className="footer">
-        <span>⌘⇧C copier • ⌘⌫ effacer • ⌘/ raccourcis</span>
+        <span>⌘1-4 modes • ⌘K calculatrice • ⌘⇧C copier • ⌘⇧E png • ⌘⇧S svg • ⌘⌫ effacer • ? aide</span>
       </footer>
 
-      {showShortcuts && (
-        <div className="modal-overlay" onClick={() => setShowShortcuts(false)} role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2 id="shortcuts-title">Raccourcis clavier</h2>
-              <button className="close-btn" onClick={() => setShowShortcuts(false)} aria-label="Fermer">×</button>
-            </div>
-            <div className="shortcuts-grid">
-              <div className="shortcut">
-                <kbd>⌘</kbd><kbd>⇧</kbd><kbd>C</kbd>
-                <span>Copier LaTeX</span>
-              </div>
-              <div className="shortcut">
-                <kbd>⌘</kbd><kbd>⌫</kbd>
-                <span>Effacer</span>
-              </div>
-              <div className="shortcut">
-                <kbd>⌘</kbd><kbd>/</kbd>
-                <span>Afficher/masquer raccourcis</span>
-              </div>
-              <div className="shortcut">
-                <kbd>Esc</kbd>
-                <span>Fermer les fenêtres</span>
-              </div>
-              <div className="shortcut-divider">Dans l'éditeur MathLive :</div>
-              <div className="shortcut">
-                <kbd>/</kbd>
-                <span>Fraction</span>
-              </div>
-              <div className="shortcut">
-                <kbd>^</kbd>
-                <span>Exposant</span>
-              </div>
-              <div className="shortcut">
-                <kbd>_</kbd>
-                <span>Indice</span>
-              </div>
-              <div className="shortcut">
-                <kbd>\\</kbd><span className="inline">sqrt</span>
-                <span>Racine carrée</span>
-              </div>
-              <div className="shortcut">
-                <kbd>\\</kbd><span className="inline">int</span>
-                <span>Intégrale</span>
-              </div>
-              <div className="shortcut">
-                <kbd>\\</kbd><span className="inline">sum</span>
-                <span>Somme</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <KeyboardShortcutsModal
+        isOpen={showShortcuts}
+        onClose={() => setShowShortcuts(false)}
+        shortcuts={shortcuts}
+        onUpdateShortcut={updateShortcut}
+        onResetShortcut={resetShortcut}
+        onResetAllShortcuts={resetAllShortcuts}
+        hasConflict={hasConflict}
+      />
+      <SaveTemplateModal
+        isOpen={showSaveTemplate}
+        onClose={() => setShowSaveTemplate(false)}
+        onSave={handleSaveTemplate}
+        categories={categories}
+        equation={equation}
+      />
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+      <QuickActions
+        equation={equation}
+        viewMode={viewMode}
+        onCopy={handleCopy}
+        onCopyImage={handleCopyAsImage}
+        onExportPNG={handleExportPNG}
+        onExportSVG={handleExportSVG}
+        onClear={handleClear}
+        isExporting={exportingImage}
+        copied={copied}
+      />
+      <CASCalculator
+        isOpen={isCASOpen}
+        onClose={closeCAS}
+        editorRef={editorRef}
+      />
     </div>
   );
 }
